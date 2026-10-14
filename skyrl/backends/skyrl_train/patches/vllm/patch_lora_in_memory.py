@@ -42,6 +42,19 @@ so a non-unit scale would compound on each LRU rebuild. Staged adapters must
 therefore arrive with the scale already folded into ``lora_B`` and
 ``lora_alpha == r`` in their config; the loader rejects anything else.
 
+Both entry points also stamp ``is_3d_lora_weight`` from the adapter's own
+layout. The engine runs with ``enable_mixed_moe_lora_format`` (see
+``inference_servers/utils.py``), so vLLM wraps every MoE model in its 2D
+``FusedMoEWithLoRA`` and only unpacks the flat 3D PEFT layout
+(``...experts.base_layer`` for gate_up_proj, bare ``...experts`` for down_proj)
+when the request declares it; the ``LoRARequest`` the load endpoint builds never
+does. ``_convert_moe_experts_lora_to_vllm`` emits exactly that layout for
+fused-expert checkpoints (gpt-oss, Qwen3.5-MoE), so without the stamp
+``FusedMoEWithLoRA.set_lora`` asserted on the unsplit ``experts`` tensor and
+every expert-adapter sync failed. The layout is read off the loaded
+``LoRAModel`` (a ``...experts.base_layer`` module), on the in-memory and the
+directory path alike; vLLM ignores the flag outside mixed mode.
+
 Remove this module once vLLM ships a tensor-backed LoRA request.
 """
 
@@ -90,6 +103,16 @@ def staged_adapter_names() -> list[str]:
 
 def discard_in_memory_adapter(lora_name: str) -> bool:
     return _STAGED.pop(lora_name, None) is not None
+
+
+def _has_3d_moe_layout(lora) -> bool:
+    """Whether the adapter stores its experts in vLLM's flat 3D PEFT layout."""
+    return any(name.endswith(".experts.base_layer") for name in lora.loras)
+
+
+def _stamp_moe_layout(lora, lora_request):
+    lora.is_3d_lora_weight = bool(lora_request.is_3d_lora_weight) or _has_3d_moe_layout(lora)
+    return lora
 
 
 def _expected_lora_modules(adapter_manager) -> set[str]:
@@ -187,14 +210,13 @@ def _load_in_memory_adapter(manager, lora_request, staged: StagedLoRAAdapter):
         weights_mapper=weights_mapper,
         skip_prefixes=skip_prefixes,
     )
-    lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
-    return lora
+    return _stamp_moe_layout(lora, lora_request)
 
 
 def _patched_load_adapter(self, lora_request):
     lora_name = lora_name_from_in_memory_path(lora_request.lora_path)
     if lora_name is None:
-        return _ORIGINAL_LOAD_ADAPTER(self, lora_request)
+        return _stamp_moe_layout(_ORIGINAL_LOAD_ADAPTER(self, lora_request), lora_request)
     staged = _STAGED.get(lora_name)
     if staged is None:
         raise RuntimeError(

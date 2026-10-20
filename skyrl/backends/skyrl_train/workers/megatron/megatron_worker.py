@@ -190,6 +190,7 @@ class MegatronWorker:
         enable_mtp=False,
         language_model_only=False,
         bridge_weights_path=None,
+        trust_remote_code=True,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -201,8 +202,8 @@ class MegatronWorker:
         masters and fake-quantizes them in the forward pass. Tokenizer + HF config
         (the logical model identity) still come from ``model_path``.
         """
-        tokenizer = get_tokenizer(model_path, trust_remote_code=True)
-        hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = get_tokenizer(model_path, trust_remote_code=trust_remote_code)
+        hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
 
         if not language_model_only:
             # VLM detection mirrors the FSDP path: a non-null ``vision_config`` on the
@@ -258,7 +259,7 @@ class MegatronWorker:
                 f"fake-INT4 QAT: loading BF16 master weights from {bridge_source} "
                 f"(logical model / inference checkpoint: {model_path})"
             )
-        bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
+        bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=trust_remote_code)
 
         # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
         # path instead of the VL Qwen3VLModel, so the vision tower is not built.
@@ -882,6 +883,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             language_model_only=self.cfg.policy.language_model_only,
             bridge_weights_path=bridge_weights_path,
             enable_mtp=self.cfg.mtp.enabled,
+            trust_remote_code=self.cfg.policy.model.trust_remote_code,
         )
 
         if self.enable_router_replay:
@@ -1939,6 +1941,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             enable_mtp=False,
             language_model_only=self.cfg.ref.language_model_only,
             bridge_weights_path=bridge_weights_path,
+            trust_remote_code=self.cfg.ref.model.trust_remote_code,
         )
 
         self.actor_module = self.make_megatron_module(

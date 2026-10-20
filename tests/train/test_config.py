@@ -152,6 +152,15 @@ def test_cli_overrides_fp8_param_gather():
     assert cfg.trainer.policy.megatron_config.ddp_config.fp8_param_gather is True
 
 
+def test_cli_overrides_trust_remote_code():
+    assert SkyRLTrainConfig.from_cli_overrides([]).trainer.policy.model.trust_remote_code is True
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        ["trainer.policy.model.trust_remote_code=false", "trainer.ref.model.trust_remote_code=false"]
+    )
+    assert cfg.trainer.policy.model.trust_remote_code is False
+    assert cfg.trainer.ref.model.trust_remote_code is False
+
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     [

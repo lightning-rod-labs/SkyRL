@@ -179,6 +179,9 @@ class FakeInt4QatConfig(BaseConfig):
 class ModelConfig(BaseConfig):
     path: Optional[str] = None
     """HuggingFace model path (or local directory) for this model."""
+    trust_remote_code: bool = True
+    """Run the model repository's custom code when loading its tokenizer, config
+    and weights. Disable to load only architectures transformers ships natively."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 

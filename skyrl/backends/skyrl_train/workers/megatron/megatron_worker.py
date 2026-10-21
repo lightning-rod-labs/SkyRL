@@ -57,6 +57,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_gpt_oss_adapter_gate_up import (
+    apply_gpt_oss_adapter_gate_up_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -130,6 +133,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
+apply_gpt_oss_adapter_gate_up_patch()
 
 
 class MegatronWorker:

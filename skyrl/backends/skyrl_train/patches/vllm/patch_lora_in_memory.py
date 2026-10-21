@@ -110,8 +110,41 @@ def _has_3d_moe_layout(lora) -> bool:
     return any(name.endswith(".experts.base_layer") for name in lora.loras)
 
 
-def _stamp_moe_layout(lora, lora_request):
+def _gpt_oss_rows_for_mixed_moe(lora, adapter_manager) -> None:
+    """Pre-permute GPT-OSS ``gate_up_proj`` ``lora_B`` rows for vLLM's mixed-format path.
+
+    The adapter holds HF's interleaved rows (gate0, up0, gate1, ...), the order of
+    GPT-OSS's fused ``w13`` weight. In mixed mode vLLM's ``_convert_3d_to_2d_moe_lora``
+    takes w1 = rows[::2] and w3 = rows[1::2], but the 2D ``FusedMoEWithLoRA`` then adds
+    them to the contiguous halves ``[0, I)`` / ``[I, 2I)`` of the still-interleaved
+    ``w13`` output, so every trained gate/up delta lands on the wrong row. Placing HF
+    rows ``[0, I)`` at the even positions and ``[I, 2I)`` at the odd ones makes vLLM's
+    split hand the 2D wrapper exactly the positional halves. Under tensor parallelism
+    each rank holds a contiguous interleaved block of ``2I / tp`` rows and the wrapper
+    slices w1 and w3 per rank, so the halves are taken per TP block. Out of place:
+    staged tensors are reused on every reload.
+    """
+    if not getattr(adapter_manager, "_enable_mixed_moe_lora_format", False):
+        return
+    architectures = getattr(getattr(getattr(adapter_manager, "model", None), "config", None), "architectures", None)
+    if not architectures or architectures[0] != "GptOssForCausalLM":
+        return
+    from vllm.distributed import get_tensor_model_parallel_world_size, model_parallel_is_initialized
+
+    tp_size = get_tensor_model_parallel_world_size() if model_parallel_is_initialized() else 1
+    for name, weights in lora.loras.items():
+        if name.endswith(".experts.base_layer"):
+            blocks = [torch.chunk(block, 2, dim=0) for block in torch.chunk(weights.lora_b, tp_size, dim=0)]
+            permuted = torch.empty_like(weights.lora_b)
+            permuted[::2] = torch.cat([first for first, _ in blocks])
+            permuted[1::2] = torch.cat([second for _, second in blocks])
+            weights.lora_b = permuted
+
+
+def _stamp_moe_layout(lora, lora_request, adapter_manager=None):
     lora.is_3d_lora_weight = bool(lora_request.is_3d_lora_weight) or _has_3d_moe_layout(lora)
+    if lora.is_3d_lora_weight:
+        _gpt_oss_rows_for_mixed_moe(lora, adapter_manager)
     return lora
 
 
@@ -210,13 +243,13 @@ def _load_in_memory_adapter(manager, lora_request, staged: StagedLoRAAdapter):
         weights_mapper=weights_mapper,
         skip_prefixes=skip_prefixes,
     )
-    return _stamp_moe_layout(lora, lora_request)
+    return _stamp_moe_layout(lora, lora_request, adapter_manager)
 
 
 def _patched_load_adapter(self, lora_request):
     lora_name = lora_name_from_in_memory_path(lora_request.lora_path)
     if lora_name is None:
-        return _stamp_moe_layout(_ORIGINAL_LOAD_ADAPTER(self, lora_request), lora_request)
+        return _stamp_moe_layout(_ORIGINAL_LOAD_ADAPTER(self, lora_request), lora_request, self._adapter_manager)
     staged = _STAGED.get(lora_name)
     if staged is None:
         raise RuntimeError(

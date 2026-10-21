@@ -79,7 +79,7 @@ def _peft_config(lora_alpha: int) -> dict:
     }
 
 
-def _manager(fused_experts: bool = False):
+def _manager(fused_experts: bool = False, gpt_oss_mixed: bool = False):
     class _AdapterManager:
         # A 2D MoE model lists each expert's projections under "experts"; a
         # fused-expert (3D) model has no expert entry in the packed mapping.
@@ -87,7 +87,12 @@ def _manager(fused_experts: bool = False):
         packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
         if not fused_experts:
             packed_modules_mapping["experts"] = [f"experts.{e}.down_proj" for e in range(4)]
-        model = SimpleNamespace(hf_to_vllm_mapper=None, lora_skip_prefixes=None)
+        model = SimpleNamespace(
+            hf_to_vllm_mapper=None,
+            lora_skip_prefixes=None,
+            config=SimpleNamespace(architectures=["GptOssForCausalLM" if gpt_oss_mixed else "Qwen3MoeForCausalLM"]),
+        )
+        _enable_mixed_moe_lora_format = gpt_oss_mixed
         # EP rank 1 of 2 with 2 local experts owns experts 2 and 3.
         moe_ep_load_spec = (
             None if fused_experts else MoEEPLoadSpec(ep_rank=1, local_num_experts=2, global_num_experts=4)
@@ -146,3 +151,26 @@ def test_flat_3d_moe_layout_is_stamped_on_the_directory_path(monkeypatch):
     monkeypatch.setattr(patch, "_ORIGINAL_LOAD_ADAPTER", _original)
     request = SimpleNamespace(lora_path="/tmp/adapter", lora_name="t", lora_int_id=7, is_3d_lora_weight=False)
     assert patch._patched_load_adapter(_manager(fused_experts=True), request).is_3d_lora_weight is True
+
+
+def test_gpt_oss_gate_up_rows_land_positionally_in_mixed_mode():
+    # vLLM's mixed path splits w1 = B[::2], w3 = B[1::2] and the 2D wrapper adds them
+    # to the contiguous halves of the interleaved w13 output; after the permutation
+    # that split must give back the HF rows [0, I) and [I, 2I) unchanged.
+    tensors = _flat_3d_tensors()
+    key = "base_model.model.model.layers.0.mlp.experts.base_layer.lora_B.weight"
+    hf_rows = tensors[key].clone()
+    patch.stage_in_memory_adapter("t", tensors, _peft_config(lora_alpha=RANK))
+    lora = patch._patched_load_adapter(_manager(fused_experts=True, gpt_oss_mixed=True), _request("t"))
+    b = lora.loras["model.layers.0.mlp.experts.base_layer"].lora_b
+    torch.testing.assert_close(torch.cat([b[::2], b[1::2]]), hf_rows)
+    # The staged tensor is untouched, so an LRU rebuild permutes from HF order again.
+    torch.testing.assert_close(tensors[key], hf_rows)
+
+
+def test_gpt_oss_gate_up_rows_untouched_outside_mixed_mode():
+    tensors = _flat_3d_tensors()
+    key = "base_model.model.model.layers.0.mlp.experts.base_layer.lora_B.weight"
+    patch.stage_in_memory_adapter("t", tensors, _peft_config(lora_alpha=RANK))
+    lora = patch._patched_load_adapter(_manager(fused_experts=True), _request("t"))
+    torch.testing.assert_close(lora.loras["model.layers.0.mlp.experts.base_layer"].lora_b, tensors[key])
